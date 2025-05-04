@@ -1,0 +1,668 @@
+import os
+import shutil
+import argparse
+import subprocess
+from ffmpeg import FFmpeg
+from pymediainfo import MediaInfo
+import time  # Add this import at the top of the file
+from webptools import dwebp, cwebp  # Import webptools for WebP conversion
+
+# Manually define input and output directories
+INPUT_DIR = "/Volumes/data/retroid_sd/roms"
+OUTPUT_DIR = "/Volumes/data/esde_media"
+
+
+def optimize_video(source_file, dest_file):
+    """
+    Convert MP4 video to MKV using x265 encoding with optimized parameters.
+
+    Args:
+        source_file: Path to the source MP4 file
+        dest_file: Path to the destination MKV file
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Validate input file first
+        if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
+            print(f"Invalid input file (missing or empty): {source_file}")
+            return False
+
+        # Skip hidden files (starting with ._)
+        if os.path.basename(source_file).startswith("._"):
+            print(f"Skipping hidden file: {source_file}")
+            return False
+
+        # Get media information using pymediainfo
+        media_info = MediaInfo.parse(source_file)
+
+        # Get total duration in seconds for progress calculation
+        duration_seconds = 0
+        for track in media_info.tracks:
+            if track.track_type == "Video":
+                if hasattr(track, "duration") and track.duration:
+                    duration_seconds = (
+                        float(track.duration) / 1000.0
+                    )  # Convert ms to seconds
+                break
+
+        # Verify the file actually contains video streams
+        has_video = False
+        for track in media_info.tracks:
+            if track.track_type == "Video":
+                has_video = True
+                break
+
+        if not has_video:
+            print(f"No video stream found in file: {source_file}")
+            return False
+
+        # Find the audio track and get its codec
+        audio_codec = ""
+        for track in media_info.tracks:
+            if track.track_type == "Audio":
+                audio_codec = track.codec.lower() if track.codec else ""
+                break
+
+        # Determine audio encoding options
+        audio_options = {}
+        if audio_codec == "aac":
+            audio_options = {"c:a": "copy"}  # Copy audio if already AAC
+        else:
+            audio_options = {"c:a": "aac", "b:a": "160k"}  # Convert to AAC 160kbps
+
+        # Configure FFmpeg for video conversion - corrected initialization
+        ffmpeg = FFmpeg()
+
+        # Add input file
+        ffmpeg.option("i", source_file)
+
+        # Add video encoding options
+        ffmpeg.option("c:v", "libx265")
+        ffmpeg.option("preset", "slow")
+        ffmpeg.option("crf", "23")
+        ffmpeg.option("x265-params", "profile=main10")
+        ffmpeg.option("pix_fmt", "yuv420p10le")
+
+        # Add audio encoding options
+        for key, value in audio_options.items():
+            ffmpeg.option(key, value)
+
+        # Set output file
+        ffmpeg.output(dest_file)
+
+        # Store the start time for ETA calculation
+        start_time = time.time()
+
+        # Add progress handler to show encoding progress
+        @ffmpeg.on("progress")
+        def on_progress(progress):
+            try:
+                # Calculate percentage based on current time and total duration
+                current_time_str = None
+                current_time_seconds = 0
+
+                # Extract current time from progress object
+                if hasattr(progress, "time"):
+                    # Handle timedelta objects directly
+                    if hasattr(progress.time, "total_seconds"):
+                        current_time_seconds = progress.time.total_seconds()
+                    else:
+                        current_time_str = str(progress.time)
+                elif isinstance(progress, dict) and "time" in progress:
+                    # Handle timedelta objects directly
+                    if hasattr(progress["time"], "total_seconds"):
+                        current_time_seconds = progress["time"].total_seconds()
+                    else:
+                        current_time_str = str(progress["time"])
+
+                # If we have a string, parse it as time
+                if current_time_str and current_time_seconds == 0:
+                    try:
+                        time_parts = current_time_str.split(":")
+                        if len(time_parts) >= 3:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = float(time_parts[2])
+                            current_time_seconds = hours * 3600 + minutes * 60 + seconds
+                    except (ValueError, IndexError, AttributeError):
+                        pass
+
+                # Calculate percentage
+                percentage = 0
+                eta_str = "unknown"
+
+                if duration_seconds > 0 and current_time_seconds > 0:
+                    percentage = min(
+                        100, (current_time_seconds / duration_seconds) * 100
+                    )
+
+                    # Calculate ETA (estimated time remaining)
+                    if percentage > 0:
+                        elapsed_time = time.time() - start_time
+                        total_estimated_time = elapsed_time * 100 / percentage
+                        time_remaining = total_estimated_time - elapsed_time
+
+                        # Format the time remaining
+                        if time_remaining < 60:
+                            eta_str = f"{time_remaining:.0f} seconds"
+                        elif time_remaining < 3600:
+                            eta_str = f"{time_remaining/60:.1f} minutes"
+                        else:
+                            eta_str = f"{time_remaining/3600:.1f} hours"
+
+                # Display progress with ETA
+                print(
+                    f"Encoding: {os.path.basename(source_file)} - {percentage:.1f}% - ETA: {eta_str}",
+                    end="\r",
+                )
+            except Exception as progress_error:
+                # Don't let progress display issues interrupt the encoding
+                print(f"\nProgress display error: {progress_error}")
+                print(f"Progress object type: {type(progress)}")
+                if hasattr(progress, "time"):
+                    print(f"Time object type: {type(progress.time)}")
+
+        # Execute the FFmpeg command
+        ffmpeg.execute()
+
+        # Check if the destination file was created successfully
+        if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+            # Compare file sizes and use the smaller one
+            input_size = os.path.getsize(source_file)
+            output_size = os.path.getsize(dest_file)
+
+            if input_size < output_size:
+                # If original file is smaller, delete the transcoded file
+                os.remove(dest_file)
+
+                # Remux the original file into MKV container without transcoding
+                print(
+                    f"Original file is smaller, remuxing to MKV without transcoding..."
+                )
+
+                # Create a new FFmpeg instance for remuxing
+                remux_ffmpeg = FFmpeg()
+                remux_ffmpeg.option("i", source_file)
+                remux_ffmpeg.option("c", "copy")  # Copy all streams without transcoding
+                remux_ffmpeg.output(dest_file)
+
+                try:
+                    # Execute the remux command
+                    remux_ffmpeg.execute()
+
+                    if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+                        remux_size = os.path.getsize(dest_file)
+                        print(
+                            f"Remuxed: {source_file} ({input_size/1024/1024:.2f}MB) -> {dest_file} ({remux_size/1024/1024:.2f}MB)"
+                        )
+                    else:
+                        print(f"Remuxing failed, falling back to direct copy")
+                        shutil.copy2(source_file, dest_file)
+                        print(
+                            f"Copied: {source_file} ({input_size/1024/1024:.2f}MB) -> {dest_file}"
+                        )
+                except Exception as remux_error:
+                    print(
+                        f"Error during remuxing: {remux_error}, falling back to direct copy"
+                    )
+                    shutil.copy2(source_file, dest_file)
+                    print(
+                        f"Copied: {source_file} ({input_size/1024/1024:.2f}MB) -> {dest_file}"
+                    )
+            else:
+                # Transcoded file is smaller or equal size, keep it
+                print(
+                    f"Optimized: {source_file} ({input_size/1024/1024:.2f}MB) -> {dest_file} ({output_size/1024/1024:.2f}MB)"
+                )
+
+            return True
+        else:
+            print(
+                f"Optimization seemed to complete but output file is missing or empty: {dest_file}"
+            )
+            return False
+    except Exception as e:
+        print(f"Error optimizing {source_file}: {str(e)}")
+        # If a partial output file was created, remove it
+        if os.path.exists(dest_file):
+            try:
+                os.remove(dest_file)
+                print(f"Removed partial output file: {dest_file}")
+            except Exception as cleanup_error:
+                print(f"Failed to remove partial output file: {cleanup_error}")
+        return False
+
+
+def optimize_image(source_file, dest_file):
+    """
+    Convert PNG or JPG/JPEG to WebP format while keeping original extension.
+
+    Args:
+        source_file: Path to the source image file
+        dest_file: Path to the destination file (should have original extension)
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Validate input file first
+        if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
+            print(f"Invalid input file (missing or empty): {source_file}")
+            return False
+
+        # Skip hidden files
+        if os.path.basename(source_file).startswith("._"):
+            print(f"Skipping hidden file: {source_file}")
+            return False
+
+        # Get file extension
+        _, ext = os.path.splitext(source_file)
+        ext = ext.lower()
+
+        # Convert to WebP
+        if ext in [".png", ".jpg", ".jpeg"]:
+            # Check if the filename has spaces or special characters
+            has_special_chars = (
+                " " in source_file or "(" in source_file or ")" in source_file
+            )
+
+            # Create a temporary directory for processing
+            temp_dir = os.path.join(os.path.dirname(dest_file), ".tmp_webp_conversion")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # Create temporary filenames without spaces - using a different naming strategy for special chars
+            if has_special_chars:
+                print(
+                    f"File has spaces or special characters, using special handling: {source_file}"
+                )
+                # Create sanitized temp filenames that avoid special characters
+                temp_input = os.path.join(
+                    temp_dir, f"input_{int(time.time())}_{os.urandom(4).hex()}{ext}"
+                )
+                temp_output = os.path.join(
+                    temp_dir, f"output_{int(time.time())}_{os.urandom(4).hex()}.webp"
+                )
+                temp_final = os.path.join(
+                    temp_dir, f"final_{int(time.time())}_{os.urandom(4).hex()}{ext}"
+                )
+            else:
+                # Standard temp filenames for regular files
+                temp_input = os.path.join(
+                    temp_dir, f"input_{int(time.time())}_{os.urandom(4).hex()}{ext}"
+                )
+                temp_output = os.path.join(
+                    temp_dir, f"output_{int(time.time())}_{os.urandom(4).hex()}.webp"
+                )
+                temp_final = None  # Not needed for regular files
+
+            try:
+                # Copy the source file to our temp location
+                shutil.copy2(source_file, temp_input)
+                print(f"Converting {source_file} to WebP...")
+
+                conversion_success = False
+
+                # Different conversion approaches based on whether we have special characters
+                if has_special_chars:
+                    try:
+                        # Try using direct subprocess for files with special characters
+                        print("Using subprocess for file with special characters...")
+
+                        # First check if cwebp is available
+                        which_result = subprocess.run(
+                            ["which", "cwebp"], capture_output=True, text=True
+                        )
+
+                        if which_result.returncode == 0:
+                            cwebp_path = which_result.stdout.strip()
+                            print(f"Found cwebp at: {cwebp_path}")
+
+                            # Use subprocess with properly quoted filenames
+                            subprocess_result = subprocess.run(
+                                [cwebp_path, "-q", "80", temp_input, "-o", temp_output],
+                                capture_output=True,
+                                text=True,
+                            )
+
+                            if subprocess_result.returncode == 0:
+                                print("Direct subprocess conversion successful")
+                                conversion_success = True
+                            else:
+                                print(
+                                    f"Direct subprocess conversion failed: {subprocess_result.stderr}"
+                                )
+                        else:
+                            print(
+                                "cwebp not found in PATH, falling back to pillow conversion"
+                            )
+
+                            # If cwebp is not available, try using Pillow for conversion
+                            try:
+                                from PIL import Image
+
+                                img = Image.open(temp_input)
+                                img.save(temp_output, "WEBP", quality=80)
+                                conversion_success = True
+                                print("Pillow conversion successful")
+                            except ImportError:
+                                print("Pillow not available")
+                            except Exception as pillow_error:
+                                print(f"Pillow conversion error: {str(pillow_error)}")
+                    except Exception as special_error:
+                        print(
+                            f"Special handling conversion error: {str(special_error)}"
+                        )
+                else:
+                    # Standard conversion using webptools
+                    try:
+                        # Use quality 80 - good balance between size and quality
+                        exit_code = cwebp(
+                            input_image=temp_input,
+                            output_image=temp_output,
+                            option="-q 80",
+                        )
+
+                        if isinstance(exit_code, dict) and "exit_code" in exit_code:
+                            exit_code = exit_code["exit_code"]
+
+                        # Print more detailed debug info
+                        print(f"WebP conversion exit code: {exit_code}")
+
+                        if exit_code == 0:
+                            conversion_success = True
+                        else:
+                            print(
+                                f"WebP conversion failed for {source_file}, exit code: {exit_code}"
+                            )
+
+                            # Try direct conversion with subprocess as fallback
+                            try:
+                                print("Trying fallback conversion with subprocess...")
+                                # Check if cwebp command exists
+                                which_result = subprocess.run(
+                                    ["which", "cwebp"], capture_output=True, text=True
+                                )
+                                if which_result.returncode == 0:
+                                    cwebp_path = which_result.stdout.strip()
+                                    print(f"Found cwebp at: {cwebp_path}")
+
+                                    # Use subprocess directly
+                                    subprocess_result = subprocess.run(
+                                        [
+                                            cwebp_path,
+                                            "-q",
+                                            "80",
+                                            temp_input,
+                                            "-o",
+                                            temp_output,
+                                        ],
+                                        capture_output=True,
+                                        text=True,
+                                    )
+
+                                    if subprocess_result.returncode == 0:
+                                        print("Fallback conversion successful!")
+                                        conversion_success = True
+                                    else:
+                                        print(
+                                            f"Fallback conversion failed: {subprocess_result.stderr}"
+                                        )
+                                else:
+                                    print("cwebp command not found in PATH")
+                            except Exception as fallback_error:
+                                print(
+                                    f"Fallback conversion error: {str(fallback_error)}"
+                                )
+                    except Exception as webp_error:
+                        print(f"WebP conversion error: {str(webp_error)}")
+
+                # If conversion was successful, check the output
+                if (
+                    conversion_success
+                    and os.path.exists(temp_output)
+                    and os.path.getsize(temp_output) > 0
+                ):
+                    # Compare file sizes
+                    input_size = os.path.getsize(source_file)
+                    webp_size = os.path.getsize(temp_output)
+
+                    if input_size < webp_size:
+                        # Original is smaller, use it
+                        shutil.copy2(source_file, dest_file)
+                        print(
+                            f"Original file is smaller, copied: {source_file} ({input_size/1024:.2f}KB) -> {dest_file}"
+                        )
+                    else:
+                        # WebP is smaller, copy it to the destination
+                        shutil.copy2(temp_output, dest_file)
+                        print(
+                            f"Optimized: {source_file} ({input_size/1024:.2f}KB) -> {dest_file} ({webp_size/1024:.2f}KB)"
+                        )
+                    return True
+                else:
+                    # If conversion failed, fall back to direct copy
+                    print(
+                        f"Conversion failed, falling back to direct copy for: {source_file}"
+                    )
+                    shutil.copy2(source_file, dest_file)
+                    print(f"Copied: {source_file} -> {dest_file}")
+                    return True
+            finally:
+                # Clean up temporary files
+                if os.path.exists(temp_input):
+                    os.remove(temp_input)
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+                if temp_final and os.path.exists(temp_final):
+                    os.remove(temp_final)
+                try:
+                    os.rmdir(temp_dir)  # Remove temp dir if empty
+                except:
+                    pass  # It's ok if we can't remove it
+        else:
+            # For unsupported formats, just copy
+            shutil.copy2(source_file, dest_file)
+            print(f"Copied (unsupported format): {source_file} -> {dest_file}")
+            return True
+
+    except Exception as e:
+        print(f"Error optimizing image {source_file}: {str(e)}")
+        # If a partial output file was created, remove it
+        if os.path.exists(dest_file):
+            try:
+                os.remove(dest_file)
+            except:
+                pass
+        return False
+
+
+def move_gamelists(input_dir, output_dir):
+    """
+    Recursively scan through input_dir for gamelist.xml files and move them to
+    output_dir/gamelists/ while maintaining the original folder structure.
+    """
+    # Create the gamelists directory in the output folder if it doesn't exist
+    gamelists_dir = os.path.join(output_dir, "gamelists")
+    if not os.path.exists(gamelists_dir):
+        os.makedirs(gamelists_dir)
+
+    # Count for reporting
+    files_moved = 0
+
+    # Walk through the directory tree
+    for root, _, files in os.walk(input_dir):
+        for file in files:
+            if file == "gamelist.xml":
+                # Get the source file path
+                source_file = os.path.join(root, file)
+
+                # Calculate the relative path from input_dir
+                rel_path = os.path.relpath(root, input_dir)
+
+                # Create the destination directory
+                dest_dir = os.path.join(gamelists_dir, rel_path)
+                if not os.path.exists(dest_dir):
+                    os.makedirs(dest_dir)
+
+                # Set the destination file path
+                dest_file = os.path.join(dest_dir, file)
+
+                # Move the file
+                shutil.copy2(source_file, dest_file)
+                print(f"Moved: {source_file} -> {dest_file}")
+                files_moved += 1
+
+    print(f"Total gamelist.xml files moved: {files_moved}")
+
+
+def copy_media_folders(input_dir, output_dir, optimize_videos=True):
+    """
+    Recursively scan through input_dir for 'media' folders and copy their contents to
+    output_dir/downloaded_media/{parent_folder_name}/ structure.
+    Optimize MP4 videos by converting to MKV with x265 encoding if optimize_videos is True.
+    Optimize PNG and JPG images by converting to WebP format.
+    """
+    # Create the downloaded_media directory in the output folder if it doesn't exist
+    downloaded_media_dir = os.path.join(output_dir, "downloaded_media")
+    if not os.path.exists(downloaded_media_dir):
+        os.makedirs(downloaded_media_dir)
+
+    # Count for reporting
+    media_folders_processed = 0
+    files_copied = 0
+    videos_optimized = 0
+    images_optimized = 0
+
+    # Walk through the directory tree
+    for root, dirs, _ in os.walk(input_dir):
+        for dir_name in dirs:
+            if dir_name == "media":
+                # Get full path to the media directory
+                media_dir_path = os.path.join(root, dir_name)
+
+                # Get the parent folder name (e.g., "megadrive")
+                parent_folder = os.path.basename(root)
+
+                # Create destination directory for this system
+                dest_system_dir = os.path.join(downloaded_media_dir, parent_folder)
+                if not os.path.exists(dest_system_dir):
+                    os.makedirs(dest_system_dir)
+
+                # For each subfolder in the media directory, process it
+                for item in os.listdir(media_dir_path):
+                    item_path = os.path.join(media_dir_path, item)
+
+                    # Only process directories (we want to copy each folder in media/)
+                    if os.path.isdir(item_path):
+                        dest_item_path = os.path.join(dest_system_dir, item)
+
+                        # Create the base destination directory if it doesn't exist
+                        if not os.path.exists(dest_item_path):
+                            os.makedirs(dest_item_path)
+
+                        # Walk through all files in the directory
+                        for file_root, _, files in os.walk(item_path):
+                            # Get the relative path from item_path
+                            rel_path = os.path.relpath(file_root, item_path)
+                            dest_file_dir = os.path.join(dest_item_path, rel_path)
+
+                            # Create destination directory if it doesn't exist
+                            if rel_path != "." and not os.path.exists(dest_file_dir):
+                                os.makedirs(dest_file_dir)
+
+                            # Process each file
+                            for file in files:
+                                src_file_path = os.path.join(file_root, file)
+                                file_lower = file.lower()
+
+                                # Check if it's a video file to optimize
+                                if optimize_videos and file_lower.endswith(".mp4"):
+                                    # Change extension to .mkv for optimized files
+                                    dest_file_name = os.path.splitext(file)[0] + ".mkv"
+                                    dest_file_path = os.path.join(
+                                        dest_file_dir, dest_file_name
+                                    )
+
+                                    # Optimize and convert the video
+                                    if optimize_video(src_file_path, dest_file_path):
+                                        videos_optimized += 1
+                                        files_copied += 1
+                                # Check if it's an image file to optimize
+                                elif file_lower.endswith((".png", ".jpg", ".jpeg")):
+                                    dest_file_path = os.path.join(dest_file_dir, file)
+
+                                    # Optimize and convert the image
+                                    if optimize_image(src_file_path, dest_file_path):
+                                        images_optimized += 1
+                                        files_copied += 1
+                                else:
+                                    # Regular file copy
+                                    dest_file_path = os.path.join(dest_file_dir, file)
+                                    shutil.copy2(src_file_path, dest_file_path)
+                                    files_copied += 1
+                                    print(
+                                        f"Copied: {src_file_path} -> {dest_file_path}"
+                                    )
+
+                media_folders_processed += 1
+
+    print(f"Total media folders processed: {media_folders_processed}")
+    print(f"Total files copied: {files_copied}")
+    if optimize_videos:
+        print(f"Total videos optimized: {videos_optimized}")
+    print(f"Total images optimized: {images_optimized}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Process gamelist.xml files and media folders"
+    )
+    parser.add_argument(
+        "-i",
+        "--input_dir",
+        default=INPUT_DIR,
+        help="Input directory to scan recursively",
+    )
+    parser.add_argument(
+        "-o",
+        "--output_dir",
+        default=OUTPUT_DIR,
+        help="Output directory where processed files will be stored",
+    )
+    parser.add_argument(
+        "--skip_gamelists",
+        action="store_true",
+        help="Skip processing gamelist.xml files",
+    )
+    parser.add_argument(
+        "--skip_media",
+        action="store_true",
+        help="Skip processing media folders",
+    )
+    parser.add_argument(
+        "--skip_video_optimization",
+        action="store_true",
+        help="Skip optimizing MP4 videos to MKV with x265 encoding",
+    )
+
+    args = parser.parse_args()
+
+    # Validate directories
+    if not os.path.isdir(args.input_dir):
+        print(
+            f"Error: Input directory '{args.input_dir}' does not exist or is not a directory"
+        )
+        exit(1)
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+
+    if not args.skip_gamelists:
+        move_gamelists(args.input_dir, args.output_dir)
+
+    if not args.skip_media:
+        copy_media_folders(
+            args.input_dir, args.output_dir, not args.skip_video_optimization
+        )
