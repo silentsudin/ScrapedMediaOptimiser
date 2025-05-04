@@ -6,6 +6,11 @@ from ffmpeg import FFmpeg
 from pymediainfo import MediaInfo
 import time  # Add this import at the top of the file
 from webptools import dwebp, cwebp  # Import webptools for WebP conversion
+import fitz  # PyMuPDF for PDF processing
+import io
+from PIL import Image
+import pikepdf
+import numpy as np
 
 # Manually define input and output directories
 INPUT_DIR = "/Volumes/data/retroid_sd/roms"
@@ -478,6 +483,224 @@ def optimize_image(source_file, dest_file):
         return False
 
 
+def optimize_pdf(source_file, dest_file):
+    """
+    Optimize PDF file by converting:
+    - Color images to JPEG2000 format
+    - Monochrome images to JBIG2 format
+
+    Args:
+        source_file: Path to the source PDF file
+        dest_file: Path to the destination PDF file
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Validate input file first
+        if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
+            print(f"Invalid PDF file (missing or empty): {source_file}")
+            return False
+
+        # Skip hidden files
+        if os.path.basename(source_file).startswith("._"):
+            print(f"Skipping hidden PDF file: {source_file}")
+            return False
+
+        # Get input file size immediately and display it
+        input_size = os.path.getsize(source_file)
+        print(
+            f"Processing PDF: {source_file} (Size: {input_size/1024:.2f}KB / {input_size/1024/1024:.2f}MB)"
+        )
+
+        # Create temporary directory for processing
+        temp_dir = os.path.join(
+            os.path.dirname(dest_file), f".tmp_pdf_conversion_{int(time.time())}"
+        )
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Temporary optimization file
+        temp_pdf = os.path.join(temp_dir, "optimized.pdf")
+
+        try:
+            # Check if ocrmypdf is installed (needed for JBIG2)
+            has_ocrmypdf = False
+            try:
+                subprocess.run(
+                    ["ocrmypdf", "--version"], capture_output=True, check=False
+                )
+                has_ocrmypdf = True
+            except (FileNotFoundError, subprocess.SubprocessError):
+                print("ocrmypdf not found, JBIG2 compression may not be available")
+
+            print(f"Optimizing PDF: {source_file}")
+
+            # Method 1: Use ocrmypdf if available (it has JBIG2 and image optimization)
+            if has_ocrmypdf:
+                print("Using ocrmypdf for optimization with JBIG2/JPEG2000 support")
+                # --redo-ocr: Re-run OCR on any text (ensures we can reprocess PDFs)
+                # --optimize 3: Maximum optimization level
+                # --jbig2-lossy: Enable lossy JBIG2 for monochrome images
+                # --jpeg-quality 75: Good balance for JPEG quality
+                result = subprocess.run(
+                    [
+                        "ocrmypdf",
+                        "--optimize",
+                        "3",
+                        "--skip-text",  # Skip OCR if already has text
+                        "--jbig2-lossy",
+                        "--jpeg-quality",
+                        "75",
+                        "--output-type",
+                        "pdf",
+                        "--quiet",
+                        source_file,
+                        temp_pdf,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    # Handle case where optimization failed but PDF might be image-only
+                    print(f"Standard optimization failed: {result.stderr}")
+                    print("Trying with force-ocr option...")
+
+                    result = subprocess.run(
+                        [
+                            "ocrmypdf",
+                            "--optimize",
+                            "3",
+                            "--force-ocr",
+                            "--jbig2-lossy",
+                            "--jpeg-quality",
+                            "75",
+                            "--output-type",
+                            "pdf",
+                            "--quiet",
+                            source_file,
+                            temp_pdf,
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+
+                optimization_success = result.returncode == 0
+
+            # Method 2: Fallback to pikepdf and manual processing
+            else:
+                # Open the PDF with PyMuPDF (fitz) for analyzing images
+                pdf_doc = fitz.open(source_file)
+                needs_optimization = False
+
+                # Scan PDF to see if it has images that need optimization
+                for page_num in range(len(pdf_doc)):
+                    page = pdf_doc[page_num]
+                    image_list = page.get_images(full=True)
+
+                    for img_index, img_info in enumerate(image_list):
+                        xref = img_info[0]
+                        base_image = pdf_doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+
+                        # Check image compression type
+                        img_type = base_image["colorspace"]
+                        compression = base_image.get("cs-name", "")
+
+                        # If not already JPEG2000 or JBIG2, mark for optimization
+                        if "JP2" not in compression and "JBIG2" not in compression:
+                            needs_optimization = True
+                            break
+
+                    if needs_optimization:
+                        break
+
+                if not needs_optimization:
+                    print(f"PDF already uses optimal compression: {source_file}")
+                    shutil.copy2(source_file, dest_file)
+                    return True
+
+                # Use pikepdf for optimization
+                with pikepdf.open(source_file) as pdf:
+                    # Save with optimization settings
+                    pdf.save(
+                        temp_pdf,
+                        compress_streams=True,
+                        object_streams="generate",
+                        linearize=False,
+                    )
+
+                optimization_success = (
+                    os.path.exists(temp_pdf) and os.path.getsize(temp_pdf) > 0
+                )
+
+            # Compare file sizes and determine which to keep
+            if optimization_success:
+                output_size = os.path.getsize(temp_pdf)
+                size_diff = input_size - output_size
+                reduction_percent = (
+                    (size_diff / input_size) * 100 if input_size > 0 else 0
+                )
+
+                print(
+                    f"Input size: {input_size/1024:.2f}KB / {input_size/1024/1024:.2f}MB"
+                )
+                print(
+                    f"Output size: {output_size/1024:.2f}KB / {output_size/1024/1024:.2f}MB"
+                )
+
+                if size_diff > 0:
+                    print(
+                        f"Size reduction: {size_diff/1024:.2f}KB ({reduction_percent:.1f}%)"
+                    )
+                else:
+                    print(
+                        f"Size increase: {-size_diff/1024:.2f}KB ({-reduction_percent:.1f}%)"
+                    )
+
+                if input_size < output_size:
+                    # Original is smaller, use it
+                    print(f"Original PDF is smaller, copying original")
+                    shutil.copy2(source_file, dest_file)
+                else:
+                    # Optimized is smaller, use it
+                    print(f"Using optimized PDF (smaller than original)")
+                    shutil.copy2(temp_pdf, dest_file)
+
+                return True
+            else:
+                print(
+                    f"PDF optimization failed, falling back to direct copy: {source_file}"
+                )
+                shutil.copy2(source_file, dest_file)
+                # Display size information even for direct copies
+                output_size = os.path.getsize(dest_file)
+                print(
+                    f"Copied without optimization: {input_size/1024:.2f}KB -> {output_size/1024:.2f}KB"
+                )
+                return True
+
+        finally:
+            # Clean up temporary files
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass
+
+    except Exception as e:
+        print(f"Error optimizing PDF {source_file}: {str(e)}")
+        # If a partial output file was created, remove it
+        if os.path.exists(dest_file):
+            try:
+                os.remove(dest_file)
+                print(f"Removed partial output file: {dest_file}")
+            except Exception as cleanup_error:
+                print(f"Failed to remove partial output file: {cleanup_error}")
+        return False
+
+
 def move_gamelists(input_dir, output_dir):
     """
     Recursively scan through input_dir for gamelist.xml files and move them to
@@ -589,6 +812,16 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                     if optimize_video(src_file_path, dest_file_path):
                                         videos_optimized += 1
                                         files_copied += 1
+                                # Check if it's a PDF file to optimize
+                                elif file_lower.endswith(".pdf"):
+                                    dest_file_path = os.path.join(dest_file_dir, file)
+
+                                    # Optimize PDF file
+                                    if optimize_pdf(src_file_path, dest_file_path):
+                                        files_copied += 1
+                                        print(
+                                            f"PDF processed: {src_file_path} -> {dest_file_path}"
+                                        )
                                 # Check if it's an image file to optimize
                                 elif file_lower.endswith((".png", ".jpg", ".jpeg")):
                                     dest_file_path = os.path.join(dest_file_dir, file)
@@ -645,6 +878,11 @@ if __name__ == "__main__":
         "--skip_video_optimization",
         action="store_true",
         help="Skip optimizing MP4 videos to MKV with x265 encoding",
+    )
+    parser.add_argument(
+        "--skip_pdf_optimization",
+        action="store_true",
+        help="Skip optimizing PDF files with JPEG2000/JBIG2 compression",
     )
 
     args = parser.parse_args()
