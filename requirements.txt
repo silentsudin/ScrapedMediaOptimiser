@@ -1,0 +1,7 @@
+ffmpeg-python
+pymediainfo
+webptools
+PyMuPDF
+Pillow
+pikepdf
+numpy
