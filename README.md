@@ -1,6 +1,10 @@
 # ScrapedMediaOptimiser
 
-ScrapedMediaOptimiser is a Python utility that optimizes media files scraped from retro gaming resources by tools like Skraper. It reduces file sizes while preserving quality to save storage space on devices with limited capacity, such as retro gaming handhelds and emulation systems.
+ScrapedMediaOptimiser is a Python utility that optimizes media files scraped from retro gaming resources by tools like Skraper. It reduces file sizes while preserving quality to save storage space on devices with limited capacity, such as retro gaming handhelds and emulation systems. 
+
+This is designed to be used with ES-DE Android and will move gamelist files to the location ES-DE Android expects
+
+I wrote this script so I could optimise the space on my SD card for my Retroid Flip 2. I plan to add an AV1 encoding flag for devices using newer processors such as the SNapdragon 8 Gen 2 (For devices like the Ayn Thor and Ayn Odin 2)
 
 ## Features
 
