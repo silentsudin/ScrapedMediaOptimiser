@@ -20,6 +20,7 @@ I wrote this script so I could optimise the space on my SD card for my Retroid F
 
 - Docker container to simplify running this tool (with both x86 and ARM builds)
 - AV1 video encoding support
+- Support for different EmulationStation implimentations
 
 ## Prerequisites
 
