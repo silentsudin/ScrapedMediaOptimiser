@@ -16,6 +16,11 @@ I wrote this script so I could optimise the space on my SD card for my Retroid F
 - **Gamelist Handling**: Properly moves gamelist.xml files to expected locations
 - **Progress Reporting**: Shows conversion progress with ETA for long operations
 
+## Planned features
+
+- Docker container to simplify running this tool (with both x86 and ARM builds)
+- AV1 video encoding support
+
 ## Prerequisites
 
 - Python 3.7+
