@@ -29,6 +29,11 @@ def optimize_video(source_file, dest_file):
         bool: True if successful, False otherwise
     """
     try:
+        # Check if destination file already exists - skip if it does
+        if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+            print(f"Skipping existing file: {dest_file}")
+            return True
+
         # Validate input file first
         if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
             print(f"Invalid input file (missing or empty): {source_file}")
@@ -252,6 +257,11 @@ def optimize_image(source_file, dest_file):
         bool: True if successful, False otherwise
     """
     try:
+        # Check if destination file already exists - skip if it does
+        if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+            print(f"Skipping existing file: {dest_file}")
+            return True
+
         # Validate input file first
         if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
             print(f"Invalid input file (missing or empty): {source_file}")
@@ -497,6 +507,11 @@ def optimize_pdf(source_file, dest_file):
         bool: True if successful, False otherwise
     """
     try:
+        # Check if destination file already exists - skip if it does
+        if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+            print(f"Skipping existing PDF file: {dest_file}")
+            return True
+
         # Validate input file first
         if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
             print(f"Invalid PDF file (missing or empty): {source_file}")
@@ -681,16 +696,70 @@ def optimize_pdf(source_file, dest_file):
                 return True
 
         finally:
-            # Clean up temporary files
-            if os.path.exists(temp_pdf):
-                os.remove(temp_pdf)
+            # Clean up temporary files with timeouts and better error handling
             try:
-                os.rmdir(temp_dir)
-            except:
-                pass
+                # First try to remove the temporary PDF file if it exists
+                if os.path.exists(temp_pdf):
+                    try:
+                        os.remove(temp_pdf)
+                        print(f"Removed temporary PDF: {temp_pdf}")
+                    except (PermissionError, OSError) as cleanup_error:
+                        print(
+                            f"Failed to remove temporary PDF {temp_pdf}: {cleanup_error}"
+                        )
+                        # Try to make the file writable in case it's read-only
+                        try:
+                            os.chmod(temp_pdf, 0o666)
+                            os.remove(temp_pdf)
+                            print(f"Removed temporary PDF after chmod: {temp_pdf}")
+                        except Exception as e:
+                            print(f"Still failed to remove temporary PDF: {e}")
+
+                # Then try to remove the temporary directory
+                if os.path.exists(temp_dir):
+                    try:
+                        # First check if directory is empty
+                        files_in_dir = os.listdir(temp_dir)
+                        if not files_in_dir:
+                            os.rmdir(temp_dir)
+                            print(f"Removed temporary directory: {temp_dir}")
+                        else:
+                            # If directory is not empty, try to remove all files first
+                            print(
+                                f"Temporary directory not empty, trying to clean up: {temp_dir}"
+                            )
+                            for filename in files_in_dir:
+                                file_path = os.path.join(temp_dir, filename)
+                                try:
+                                    if os.path.isfile(file_path) or os.path.islink(
+                                        file_path
+                                    ):
+                                        os.unlink(file_path)
+                                    elif os.path.isdir(file_path):
+                                        shutil.rmtree(file_path)
+                                except Exception as e:
+                                    print(f"Failed to delete {file_path}: {e}")
+
+                            # Try again to remove the directory
+                            if not os.listdir(temp_dir):
+                                os.rmdir(temp_dir)
+                                print(
+                                    f"Removed temporary directory after cleanup: {temp_dir}"
+                                )
+                            else:
+                                print(
+                                    f"Could not fully clean temporary directory: {temp_dir}"
+                                )
+                    except Exception as dir_error:
+                        print(f"Failed to remove temporary directory: {dir_error}")
+                        # Don't let this stop the process
+            except Exception as cleanup_error:
+                print(f"Error during cleanup: {cleanup_error}")
+                # Continue with execution regardless of cleanup errors
 
     except Exception as e:
         print(f"Error optimizing PDF {source_file}: {str(e)}")
+        traceback.print_exc()  # Add this to get full error trace
         # If a partial output file was created, remove it
         if os.path.exists(dest_file):
             try:
@@ -713,6 +782,7 @@ def move_gamelists(input_dir, output_dir):
 
     # Count for reporting
     files_moved = 0
+    files_skipped = 0
 
     # Walk through the directory tree
     for root, _, files in os.walk(input_dir):
@@ -732,12 +802,19 @@ def move_gamelists(input_dir, output_dir):
                 # Set the destination file path
                 dest_file = os.path.join(dest_dir, file)
 
+                # Check if the file already exists in destination
+                if os.path.exists(dest_file) and os.path.getsize(dest_file) > 0:
+                    print(f"Skipping existing gamelist: {dest_file}")
+                    files_skipped += 1
+                    continue
+
                 # Move the file
                 shutil.copy2(source_file, dest_file)
                 print(f"Moved: {source_file} -> {dest_file}")
                 files_moved += 1
 
     print(f"Total gamelist.xml files moved: {files_moved}")
+    print(f"Total gamelist.xml files skipped: {files_skipped}")
 
 
 def copy_media_folders(input_dir, output_dir, optimize_videos=True):
@@ -755,6 +832,7 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
     # Count for reporting
     media_folders_processed = 0
     files_copied = 0
+    files_skipped = 0
     videos_optimized = 0
     images_optimized = 0
 
@@ -797,7 +875,25 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
 
                             # Process each file
                             for file in files:
+                                # Skip macOS hidden files at the outset
+                                if file.startswith("._"):
+                                    print(
+                                        f"Skipping macOS hidden file: {file} (completely bypassing all processing)"
+                                    )
+                                    files_skipped += 1
+                                    continue  # This should skip to the next file without further processing
+
+                                # Get full path to source file
                                 src_file_path = os.path.join(file_root, file)
+
+                                # Double-check that we're not processing a hidden file (defensive check)
+                                if os.path.basename(src_file_path).startswith("._"):
+                                    print(
+                                        f"Secondary hidden file check caught: {src_file_path}"
+                                    )
+                                    files_skipped += 1
+                                    continue
+
                                 file_lower = file.lower()
 
                                 # Check if it's a video file to optimize
@@ -808,6 +904,17 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                         dest_file_dir, dest_file_name
                                     )
 
+                                    # Check if destination already exists
+                                    if (
+                                        os.path.exists(dest_file_path)
+                                        and os.path.getsize(dest_file_path) > 0
+                                    ):
+                                        print(
+                                            f"Skipping existing video: {dest_file_path}"
+                                        )
+                                        files_skipped += 1
+                                        continue
+
                                     # Optimize and convert the video
                                     if optimize_video(src_file_path, dest_file_path):
                                         videos_optimized += 1
@@ -815,6 +922,17 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                 # Check if it's a PDF file to optimize
                                 elif file_lower.endswith(".pdf"):
                                     dest_file_path = os.path.join(dest_file_dir, file)
+
+                                    # Check if destination already exists
+                                    if (
+                                        os.path.exists(dest_file_path)
+                                        and os.path.getsize(dest_file_path) > 0
+                                    ):
+                                        print(
+                                            f"Skipping existing PDF: {dest_file_path}"
+                                        )
+                                        files_skipped += 1
+                                        continue
 
                                     # Optimize PDF file
                                     if optimize_pdf(src_file_path, dest_file_path):
@@ -826,6 +944,17 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                 elif file_lower.endswith((".png", ".jpg", ".jpeg")):
                                     dest_file_path = os.path.join(dest_file_dir, file)
 
+                                    # Check if destination already exists
+                                    if (
+                                        os.path.exists(dest_file_path)
+                                        and os.path.getsize(dest_file_path) > 0
+                                    ):
+                                        print(
+                                            f"Skipping existing image: {dest_file_path}"
+                                        )
+                                        files_skipped += 1
+                                        continue
+
                                     # Optimize and convert the image
                                     if optimize_image(src_file_path, dest_file_path):
                                         images_optimized += 1
@@ -833,6 +962,18 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                 else:
                                     # Regular file copy
                                     dest_file_path = os.path.join(dest_file_dir, file)
+
+                                    # Check if destination already exists
+                                    if (
+                                        os.path.exists(dest_file_path)
+                                        and os.path.getsize(dest_file_path) > 0
+                                    ):
+                                        print(
+                                            f"Skipping existing file: {dest_file_path}"
+                                        )
+                                        files_skipped += 1
+                                        continue
+
                                     shutil.copy2(src_file_path, dest_file_path)
                                     files_copied += 1
                                     print(
@@ -843,6 +984,7 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
 
     print(f"Total media folders processed: {media_folders_processed}")
     print(f"Total files copied: {files_copied}")
+    print(f"Total files skipped (already exist): {files_skipped}")
     if optimize_videos:
         print(f"Total videos optimized: {videos_optimized}")
     print(f"Total images optimized: {images_optimized}")
