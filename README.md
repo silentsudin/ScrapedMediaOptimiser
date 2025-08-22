@@ -4,7 +4,7 @@ ScrapedMediaOptimiser is a Python utility that optimizes media files scraped fro
 
 This is designed to be used with ES-DE Android and will move gamelist files to the location ES-DE Android expects
 
-I wrote this script so I could optimise the space on my SD card for my Retroid Flip 2. I plan to add an AV1 encoding flag for devices using newer processors such as the SNapdragon 8 Gen 2 (For devices like the Ayn Thor and Ayn Odin 2)
+I wrote this script so I could optimise the space on my SD card for my Retroid Flip 2. I plan to add an AV1 encoding flag for devices using newer processors such as the Snapdragon 8 Gen 2 (For devices like the Ayn Thor and Ayn Odin 2)
 
 ## Features
 
