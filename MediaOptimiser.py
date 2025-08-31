@@ -2,6 +2,7 @@ import os
 import shutil
 import argparse
 import subprocess
+import traceback
 from ffmpeg import FFmpeg
 from pymediainfo import MediaInfo
 import time  # Add this import at the top of the file
@@ -13,17 +14,18 @@ import pikepdf
 import numpy as np
 
 # Manually define input and output directories
-INPUT_DIR = "/Volumes/data/retroid_sd/roms"
-OUTPUT_DIR = "/Volumes/data/esde_media"
+INPUT_DIR = "/Users/holzr/roms"
+OUTPUT_DIR = "/Users/holzr/esde_media"
 
 
-def optimize_video(source_file, dest_file):
+def optimize_video(source_file, dest_file, use_av1=False):
     """
-    Convert MP4 video to MKV using x265 encoding with optimized parameters.
+    Convert MP4 video to MKV using x265 or AV1 encoding with optimized parameters.
 
     Args:
         source_file: Path to the source MP4 file
         dest_file: Path to the destination MKV file
+        use_av1: If True, use AV1 encoding instead of x265
 
     Returns:
         bool: True if successful, False otherwise
@@ -75,12 +77,13 @@ def optimize_video(source_file, dest_file):
                 audio_codec = track.codec.lower() if track.codec else ""
                 break
 
-        # Determine audio encoding options
-        audio_options = {}
-        if audio_codec == "aac":
-            audio_options = {"c:a": "copy"}  # Copy audio if already AAC
-        else:
-            audio_options = {"c:a": "aac", "b:a": "160k"}  # Convert to AAC 160kbps
+        # Determine audio encoding options - always convert to Opus VBR 96kbps
+        audio_options = {
+            "c:a": "libopus",
+            "b:a": "96k",
+            "vbr": "on",
+            "compression_level": "10",
+        }
 
         # Configure FFmpeg for video conversion - corrected initialization
         ffmpeg = FFmpeg()
@@ -88,12 +91,23 @@ def optimize_video(source_file, dest_file):
         # Add input file
         ffmpeg.option("i", source_file)
 
-        # Add video encoding options
-        ffmpeg.option("c:v", "libx265")
-        ffmpeg.option("preset", "slow")
-        ffmpeg.option("crf", "23")
-        ffmpeg.option("x265-params", "profile=main10")
-        ffmpeg.option("pix_fmt", "yuv420p10le")
+        # Add video encoding options based on codec choice
+        if use_av1:
+            # SVT-AV1 encoding options
+            ffmpeg.option("c:v", "libsvtav1")
+            ffmpeg.option("crf", "40")  # Higher CRF for AV1 as it's more efficient
+            ffmpeg.option(
+                "preset", "6"
+            )  # SVT-AV1 preset (0-13, lower = slower/better quality)
+            ffmpeg.option("svtav1-params", "tune=0:enable-overlays=1:scd=1")
+            ffmpeg.option("pix_fmt", "yuv420p10le")
+        else:
+            # x265 encoding options (original)
+            ffmpeg.option("c:v", "libx265")
+            ffmpeg.option("preset", "slow")
+            ffmpeg.option("crf", "23")
+            ffmpeg.option("x265-params", "profile=main10")
+            ffmpeg.option("pix_fmt", "yuv420p10le")
 
         # Add audio encoding options
         for key, value in audio_options.items():
@@ -162,9 +176,10 @@ def optimize_video(source_file, dest_file):
                         else:
                             eta_str = f"{time_remaining/3600:.1f} hours"
 
-                # Display progress with ETA
+                # Display progress with ETA and codec info
+                codec_name = "SVT-AV1" if use_av1 else "x265"
                 print(
-                    f"Encoding: {os.path.basename(source_file)} - {percentage:.1f}% - ETA: {eta_str}",
+                    f"Encoding ({codec_name}): {os.path.basename(source_file)} - {percentage:.1f}% - ETA: {eta_str}",
                     end="\r",
                 )
             except Exception as progress_error:
@@ -817,7 +832,7 @@ def move_gamelists(input_dir, output_dir):
     print(f"Total gamelist.xml files skipped: {files_skipped}")
 
 
-def copy_media_folders(input_dir, output_dir, optimize_videos=True):
+def copy_media_folders(input_dir, output_dir, optimize_videos=True, use_av1=False):
     """
     Recursively scan through input_dir for 'media' folders and copy their contents to
     output_dir/downloaded_media/{parent_folder_name}/ structure.
@@ -916,7 +931,9 @@ def copy_media_folders(input_dir, output_dir, optimize_videos=True):
                                         continue
 
                                     # Optimize and convert the video
-                                    if optimize_video(src_file_path, dest_file_path):
+                                    if optimize_video(
+                                        src_file_path, dest_file_path, use_av1
+                                    ):
                                         videos_optimized += 1
                                         files_copied += 1
                                 # Check if it's a PDF file to optimize
@@ -1019,12 +1036,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip_video_optimization",
         action="store_true",
-        help="Skip optimizing MP4 videos to MKV with x265 encoding",
+        help="Skip optimizing MP4 videos to MKV with x265/AV1 encoding",
     )
     parser.add_argument(
         "--skip_pdf_optimization",
         action="store_true",
         help="Skip optimizing PDF files with JPEG2000/JBIG2 compression",
+    )
+    parser.add_argument(
+        "--av1",
+        action="store_true",
+        help="Use AV1 encoding instead of x265 for video optimization",
     )
 
     args = parser.parse_args()
@@ -1044,5 +1066,5 @@ if __name__ == "__main__":
 
     if not args.skip_media:
         copy_media_folders(
-            args.input_dir, args.output_dir, not args.skip_video_optimization
+            args.input_dir, args.output_dir, not args.skip_video_optimization, args.av1
         )
