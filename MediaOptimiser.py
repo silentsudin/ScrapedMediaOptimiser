@@ -14,8 +14,8 @@ import pikepdf
 import numpy as np
 
 # Manually define input and output directories
-INPUT_DIR = "/Volumes/data/retroid_sd/roms"
-OUTPUT_DIR = "/Volumes/data/esde_media"
+INPUT_DIR = "/Users/holzr/roms"
+OUTPUT_DIR = "/Users/holzr/esde_media"
 
 
 def optimize_video(source_file, dest_file, use_av1=False):
@@ -95,7 +95,7 @@ def optimize_video(source_file, dest_file, use_av1=False):
         if use_av1:
             # SVT-AV1 encoding options
             ffmpeg.option("c:v", "libsvtav1")
-            ffmpeg.option("crf", "30")  # Higher CRF for AV1 as it's more efficient
+            ffmpeg.option("crf", "40")  # Higher CRF for AV1 as it's more efficient
             ffmpeg.option(
                 "preset", "6"
             )  # SVT-AV1 preset (0-13, lower = slower/better quality)
